@@ -1,1 +1,1 @@
-# playlist-mood-ai
+# LyricsAI
