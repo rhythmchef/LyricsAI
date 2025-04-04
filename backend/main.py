@@ -57,17 +57,9 @@ def callback(request: Request):
         
         # Debug session data size
         session_data = json.dumps(top_tracks_info)
-        print("*******Session size in bytes:", len(session_data.encode("utf-8")))
+        print("Data size in bytes:", len(session_data.encode("utf-8")))
         
-        # Store in session
-        request.session["top_tracks"] = top_tracks_info
-        print("CALLBACK: Session keys after storing:", list(request.session.keys()))
-        print("CALLBACK: Storing in session:", len(top_tracks_info), "tracks")
-        print("CALLBACK: First track ID:", top_tracks_info[0]["id"])
-        print("CALLBACK: All cookies:", request.cookies)
-        print("CALLBACK: Session cookie:", request.cookies.get("spotify_lyrics_session"))
-        
-        # Return HTML that will trigger the analyze request
+        # Return HTML that will store data in localStorage and redirect
         return HTMLResponse(content=f"""
         <html>
             <head>
@@ -77,7 +69,10 @@ def callback(request: Request):
                 <h1>Analyzing Track</h1>
                 <p>Redirecting to analysis...</p>
                 <script>
-                    // Wait for session cookie to be set
+                    // Store tracks in localStorage
+                    localStorage.setItem('top_tracks', JSON.stringify({json.dumps(top_tracks_info)}));
+                    
+                    // Wait for data to be stored
                     setTimeout(() => {{
                         window.location.href = '/analyze_track/{top_tracks_info[0]["id"]}';
                     }}, 1000);
@@ -91,18 +86,115 @@ def callback(request: Request):
 @app.get("/analyze_track/{track_id}")
 def analyze_track(track_id: str, request: Request):
     print("ANALYZE: Looking for track_id:", track_id)
-    print("ANALYZE: Session contains:", request.session.keys())
-    print("ANALYZE: Session cookie:", request.cookies.get("spotify_lyrics_session"))
-    print("ANALYZE: All cookies:", request.cookies)
-    print("ANALYZE: Request headers:", dict(request.headers))
-    top_tracks = request.session.get("top_tracks", [])
-    print("ANALYZE: Number of tracks in session:", len(top_tracks))
-    if len(top_tracks) > 0:
-        print("ANALYZE: First track ID in session:", top_tracks[0]["id"])
     
-    track = next((t for t in top_tracks if t["id"] == track_id), None)
+    # Return HTML that will read from localStorage
+    return HTMLResponse(content=f"""
+    <html>
+        <head>
+            <title>Analyzing Track</title>
+            <style>
+                .track-list {{
+                    margin: 20px 0;
+                    padding: 0;
+                    list-style: none;
+                }}
+                .track-item {{
+                    padding: 10px;
+                    margin: 5px 0;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                    cursor: pointer;
+                }}
+                .track-item:hover {{
+                    background-color: #f0f0f0;
+                }}
+                .no-lyrics {{
+                    color: #666;
+                    font-style: italic;
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>Analyzing Track</h1>
+            <p>Loading track data...</p>
+            <div id="debug"></div>
+            <div id="result"></div>
+            <div id="track-selector" style="display: none;">
+                <h2>Select a different track to analyze:</h2>
+                <ul class="track-list" id="track-list"></ul>
+            </div>
+            <script>
+                // Get tracks from localStorage
+                const tracks = JSON.parse(localStorage.getItem('top_tracks') || '[]');
+                console.log('Tracks in localStorage:', tracks);
+                document.getElementById('debug').innerHTML += `<p>Tracks found: ${{tracks.length}}</p>`;
+                
+                const track = tracks.find(t => t.id === '{track_id}');
+                console.log('Found track:', track);
+                document.getElementById('debug').innerHTML += `<p>Track found: ${{!!track}}</p>`;
+                
+                if (!track) {{
+                    document.getElementById('result').innerHTML = 'Track not found';
+                }} else {{
+                    // Fetch lyrics and display result
+                    fetch(`/api/analyze_track/{track_id}`, {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json'
+                        }},
+                        body: JSON.stringify({{ track }})
+                    }})
+                        .then(response => {{
+                            console.log('Response status:', response.status);
+                            return response.json();
+                        }})
+                        .then(data => {{
+                            console.log('Response data:', data);
+                            if (data.error) {{
+                                document.getElementById('result').innerHTML = `Error: ${{data.error}}`;
+                            }} else {{
+                                document.getElementById('result').innerHTML = `
+                                    <h2>${{track.track_name}} by ${{track.main_artist}}</h2>
+                                    <p>Album: ${{track.album}}</p>
+                                    <p>Lyrics: ${{data.lyrics}}</p>
+                                `;
+                                
+                                // If lyrics are not available, show track selector
+                                if (data.lyrics.includes('Coming soon') || data.lyrics.includes('No lyrics found')) {{
+                                    document.getElementById('result').innerHTML += '<p class="no-lyrics">Lyrics not available for this track. Please select another track:</p>';
+                                    document.getElementById('track-selector').style.display = 'block';
+                                    
+                                    // Populate track list
+                                    const trackList = document.getElementById('track-list');
+                                    tracks.forEach(t => {{
+                                        const li = document.createElement('li');
+                                        li.className = 'track-item';
+                                        li.innerHTML = `${{t.track_name}} by ${{t.main_artist}}`;
+                                        li.onclick = () => window.location.href = `/analyze_track/${{t.id}}`;
+                                        trackList.appendChild(li);
+                                    }});
+                                }}
+                            }}
+                        }})
+                        .catch(error => {{
+                            console.error('Error:', error);
+                            document.getElementById('result').innerHTML = 'Error analyzing track';
+                            document.getElementById('debug').innerHTML += `<p>Error: ${{error.message}}</p>`;
+                        }});
+                }}
+            </script>
+        </body>
+    </html>
+    """)
+
+@app.post("/api/analyze_track/{track_id}")
+async def api_analyze_track(track_id: str, request: Request):
+    # Get track info from request body
+    body = await request.json()
+    track = body.get("track")
+    
     if not track:
-        return {"error": "Track not found"}
+        return {"error": "Track information not provided"}
         
     lyrics = genius_service.search_song(track["track_name"], track["main_artist"])
     if not lyrics:
